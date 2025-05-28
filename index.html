@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Balança Serial</title>
+</head>
+<body>
+  <h1>Configuração da Balança</h1>
+  <label>Porta Serial: <input id="port" value="COM2" /></label><br>
+  <label>Baud Rate: <input id="baudRate" value="2400" /></label><br>
+  <label>Porta HTTP: <input id="httpPort" value="5000" /></label><br><br>
+  <button id="startBtn">Iniciar</button>
+  <button id="stopBtn">Parar</button>
+
+  <h2>Peso Atual:</h2>
+  <div id="peso">--</div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
