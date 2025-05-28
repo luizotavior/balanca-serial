@@ -14,9 +14,11 @@ function createWindow() {
     height: 400,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      // Adicione estas linhas para depuração no desenvolvimento:
-      nodeIntegration: true,
-      contextIsolation: false,
+      // As duas linhas a seguir são CRUCIAIS para que contextBridge funcione
+      contextIsolation: true, // DEVE ser true para usar contextBridge
+      nodeIntegration: false, // DEVE ser false para manter a segurança com contextIsolation
+      // As linhas abaixo são para depuração, remova em produção se quiser
+      openDevTools: true // Se quiser que as ferramentas de desenvolvedor abram automaticamente
     },
   });
 
@@ -74,6 +76,7 @@ ipcMain.handle('start-server', async (_, config) => {
       console.log(`[SerialPort] Peso extraído e atualizado: '${pesoAtual}'`);
       
       // Envia o peso para o processo de renderização (frontend do Electron)
+      
       mainWindow.webContents.send('peso', pesoAtual);
     });
 
