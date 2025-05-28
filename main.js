@@ -97,75 +97,57 @@ ipcMain.handle('start-server', async (_, config) => {
       }, pollingFrequency);
     });
 
-    serial.on('data', (data) => {
-      const rawData = data.toString().trim(); // rawData já é uma linha pelo ReadlineParser
-      console.log(`[SerialPort - Main] Dados brutos recebidos: '${rawData}' (Hex: ${Buffer.from(rawData).toString('hex')})`);
+serial.on('data', (data) => {
+  const rawData = data.toString().trim();
+  console.log(`[SerialPort - Main] Dados brutos recebidos: '${rawData}' (Hex: ${Buffer.from(rawData).toString('hex')})`);
 
-      // === LÓGICA DE PARSEAMENTO PARA TOLEDO PRIX 3FIT ===
-      // Formato esperado: [STX][ppppppp][iiii][ETX]
-      // Exemplo no manual: [STX]0014385[ETX] para 14.385 (14kg 385g)
+  // Toledo Prix 3Fit - Novo Parseamento para [STX]NNNNN[ETX] ou [STX]NNNNNN[ETX]
+  // O Hex que você mostrou (02303032353203) é STX (02) + "00252" + ETX (03)
+  // Então, a string rawData será "00252" (se o ReadlineParser já remover STX/ETX, o que é improvável)
+  // Ou será '\x0200252\x03' (se o ReadlineParser estiver apenas quebrando por \r\n).
 
-      // Remover STX (0x02) e ETX (0x03) se eles ainda estiverem na string
-      // Eles não deveriam estar se o ReadlineParser com \r\n estiver funcionando.
-      // Mas para segurança, vamos removê-los.
-      let cleanData = rawData.replace(/\x02|\x03/g, ''); // Remove STX e ETX por seus códigos hexadecimais
+  // Primeiro, remova STX (0x02) e ETX (0x03) da string, se presentes.
+  // Isso garante que só tenhamos os dígitos do peso.
+  let cleanData = rawData.replace(/\x02|\x03/g, ''); // Remove STX (0x02) e ETX (0x03)
 
-      // Regex para validar o formato do peso e indicadores
-      // Procura 7 dígitos para o peso (ppppppp) e 5 caracteres para o indicador (iiii)
-      // O manual mostra 5 dígitos para pppppp no exemplo 0014385 (que tem 7),
-      // e 5 caracteres para iiii (11111, 00000, SSSSS).
-      // Vamos assumir que ppppppp tem 7 caracteres (5 inteiros, 2 decimais implícitos).
-      const match = cleanData.match(/^(\d{7})([10S]{5})$/); // Captura 7 dígitos para peso e 5 caracteres para indicador
+  // Agora, tente extrair os dígitos numéricos.
+  // O peso "00252" sugere 3 casas decimais implícitas ou que o valor é em gramas diretamente.
+  // Se 00252 significa 252 gramas, então é só converter para inteiro.
+  // Se 00252 significa 0.252 kg, precisamos dividir por 1000.
+  const extractedWeightMatch = cleanData.match(/^(\d+)$/); // Procura uma string que consiste APENAS de dígitos
 
-      if (match && match[1]) {
-        const pesoRaw = match[1]; // Ex: "0014385"
-        const indicador = match[2]; // Ex: "11111" ou "00000"
+  if (extractedWeightMatch && extractedWeightMatch[1]) {
+    const pesoRaw = extractedWeightMatch[1]; // Ex: "00252"
 
-        // Parte inteira: primeiros 5 dígitos (ex: "00143")
-        // Parte decimal: últimos 2 dígitos (ex: "85")
-        const pesoInteiroStr = pesoRaw.substring(0, 5);
-        const pesoDecimalStr = pesoRaw.substring(5, 7);
+    // --- LÓGICA DE CONVERSÃO DO PESO ---
+    // A Toledo Prix geralmente envia em gramas ou com 3 casas decimais implícitas.
+    // Se "00252" = 252g:
+    const pesoEmGrams = parseInt(pesoRaw);
+    console.log(`[SerialPort - Main] Peso extraído: ${pesoEmGrams}g (assumindo formato em gramas)`);
 
-        // Converte para um número float em kg (ex: 14.38)
-        const pesoEmKilos = parseFloat(`${parseInt(pesoInteiroStr)}.${pesoDecimalStr}`);
-        // Converte para gramas (espera-se que o frontend lide com gramas)
-        const pesoEmGrams = Math.round(pesoEmKilos * 1000);
+    // Se "00252" = 0.252 kg (252 gramas), que é o mais provável para balanças em kg
+    // const pesoEmKilos = parseInt(pesoRaw) / 1000; // Ex: 0.252
+    // const pesoEmGrams = Math.round(pesoEmKilos * 1000); // 252
 
-        // Verifique o indicador para determinar se o peso é válido
-        let pesoValido = true;
-        if (indicador === '11111') {
-            console.log('[SerialPort - Main] Balança indica peso instável.');
-            pesoValido = false;
-        } else if (indicador === '00000') {
-            console.log('[SerialPort - Main] Balança indica peso negativo ou zero.');
-            // Se o peso for 00000.00kg, é 0.
-            if (pesoEmGrams === 0) {
-                // A balança está zerada, isso é um peso válido para resetar.
-            } else {
-                // É um peso negativo que a balança não consegue indicar. Considerar inválido para impressão.
-                pesoValido = false;
-            }
-        } else if (indicador === 'SSSSS') {
-            console.log('[SerialPort - Main] Balança indica sobrecarga.');
-            pesoValido = false;
-        }
+    // Ou se 5 dígitos: 00252 -> 2.52 kg (assumindo 2 casas decimais)
+    // const pesoInteiroStr = pesoRaw.substring(0, pesoRaw.length - 2);
+    // const pesoDecimalStr = pesoRaw.substring(pesoRaw.length - 2);
+    // const pesoEmKilos = parseFloat(`${parseInt(pesoInteiroStr)}.${pesoDecimalStr}`);
+    // const pesoEmGrams = Math.round(pesoEmKilos * 1000);
 
-        if (pesoValido) {
-            pesoAtual = pesoEmGrams.toString(); // Armazena o peso em gramas como string
-            console.log(`[SerialPort - Main] Peso extraído: ${pesoEmKilos.toFixed(3)}kg -> ${pesoAtual}g`);
-        } else {
-            pesoAtual = ''; // Ou 0, se preferir
-            console.log(`[SerialPort - Main] Peso inválido ou instável detectado (${indicador}). Peso zerado.`);
-        }
+    // O mais seguro para "00252" é assumir que são gramas se a balança pesa em kg com 3 casas decimais.
+    // Se a balança pesa em kg com 2 casas decimais, um peso de 252g seria "000.25".
 
-      } else {
-        // Se não encontrar o padrão Toledo esperado
-        console.log(`[SerialPort - Main] Formato de resposta inesperado ou não-peso: '${rawData}'. Peso zerado.`);
-        pesoAtual = ''; // Reseta se o formato não é o do peso
-      }
+    pesoAtual = pesoEmGrams.toString(); // Armazena como string (frontend espera gramas)
 
-      mainWindow.webContents.send('peso', pesoAtual);
-    });
+  } else {
+    // Se não encontrar o padrão numérico esperado
+    console.log(`[SerialPort - Main] Formato de resposta de peso inesperado: '${cleanData}'. Peso zerado.`);
+    pesoAtual = ''; // Ou '0'
+  }
+
+  mainWindow.webContents.send('peso', pesoAtual);
+});
 
     serial.on('error', (err) => {
       console.error(`[SerialPort] ERRO CRÍTICO na serial ${port}: ${err.message}`);
