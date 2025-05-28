@@ -1,20 +1,168 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>Balança Serial</title>
+    <meta charset="UTF-8">
+    <title>Balança Self-Service</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #f4f7f6;
+            color: #333;
+            text-align: center;
+        }
+
+        .container {
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 450px;
+        }
+
+        h1 {
+            color: #2c3e50;
+            font-size: 2em;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+            text-align: left;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+
+        .form-group input[type="text"],
+        .form-group input[type="number"] {
+            width: calc(100% - 20px);
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 1em;
+            box-sizing: border-box; /* Garante que padding não aumente a largura */
+        }
+
+        .button-group {
+            margin-top: 25px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            background-color: #4CAF50; /* Verde */
+            color: white;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            margin: 0 10px;
+            transition: background-color 0.3s ease;
+        }
+
+        button#stopBtn {
+            background-color: #f44336; /* Vermelho */
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        .status-section {
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #eee;
+        }
+
+        .status-message {
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: #666;
+            min-height: 20px; /* Garante espaço para a mensagem */
+        }
+
+        .status-message.success {
+            color: #28a745;
+        }
+
+        .status-message.error {
+            color: #dc3545;
+        }
+
+        #peso {
+            font-size: 4em; /* Peso em destaque */
+            font-weight: bold;
+            color: #007bff; /* Azul */
+            margin-top: 15px;
+            min-height: 1.2em; /* Garante espaço */
+        }
+
+        .loading-spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+            margin-left: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
 </head>
 <body>
-  <h1>Configuração da Balança</h1>
-  <label>Porta Serial: <input id="port" value="COM2" /></label><br>
-  <label>Baud Rate: <input id="baudRate" value="2400" /></label><br>
-  <label>Porta HTTP: <input id="httpPort" value="5000" /></label><br><br>
-  <button id="startBtn">Iniciar</button>
-  <button id="stopBtn">Parar</button>
+    <div class="container">
+        <h1>Módulo Balança Self-Service</h1>
 
-  <h2>Peso Atual:</h2>
-  <div id="peso">--</div>
+        <div class="form-group">
+            <label for="port">Porta Serial:</label>
+            <input type="text" id="port" value="COM2" placeholder="Ex: COM2 ou /dev/ttyUSB0">
+        </div>
 
-  <script src="renderer.js"></script>
+        <div class="form-group">
+            <label for="baudRate">Baud Rate:</label>
+            <input type="number" id="baudRate" value="2400" placeholder="Ex: 9600">
+        </div>
+
+        <div class="form-group">
+            <label for="httpPort">Porta HTTP para API:</label>
+            <input type="number" id="httpPort" value="5000" placeholder="Ex: 5000">
+        </div>
+
+        <div class="button-group">
+            <button id="startBtn">Iniciar Balança</button>
+            <button id="stopBtn" disabled>Parar Balança</button>
+        </div>
+
+        <div class="status-section">
+            <h2>Peso Atual:</h2>
+            <div id="peso">--</div>
+            <div id="statusMessage" class="status-message">Aguardando configurações...</div>
+        </div>
+    </div>
+
+    <script src="renderer.js"></script>
 </body>
 </html>
