@@ -95,12 +95,26 @@ ipcMain.handle('start-server', async (_, config) => {
         return reject(`Erro ao configurar porta serial: ${err.message}`);
     }
 
+let pollIntervalId = null; // Variável para armazenar o ID do intervalo
 
-    serial.on('open', () => {
-      console.log(`[SerialPort] Porta ${port} aberta com sucesso!`);
-      // Só resolvemos a Promise após a porta e o servidor Express iniciarem com sucesso
-      // (a parte do Express vem depois)
-    });
+serial.on('open', () => {
+  console.log(`[SerialPort] Porta ${port} aberta com sucesso!`);
+  // Enviar comando para balança a cada X milissegundos
+  const pollCommand = 'P\r\n'; // Exemplo: um 'P' seguido de Carriage Return e Line Feed
+  const pollFrequency = 1000; // A cada 1 segundo
+
+  pollIntervalId = setInterval(() => {
+    if (serial && serial.isOpen) {
+      serial.write(pollCommand, (err) => {
+        if (err) {
+          console.error(`[SerialPort] Erro ao enviar comando de polling: ${err.message}`);
+        } else {
+          // console.log(`[SerialPort] Comando '${pollCommand.trim()}' enviado.`);
+        }
+      });
+    }
+  }, pollFrequency);
+});
 
     serial.on('data', (data) => {
       const rawData = data.toString().trim();
@@ -174,6 +188,11 @@ ipcMain.handle('start-server', async (_, config) => {
 
 // Manipulador IPC para parar tudo
 ipcMain.handle('stop-server', () => {
+  if (pollIntervalId) {
+    clearInterval(pollIntervalId);
+    pollIntervalId = null;
+    console.log('[SerialPort] Polling parado.');
+  }
   return new Promise((resolve, reject) => {
     let closedCount = 0;
     const totalToClose = (server ? 1 : 0) + (serial && serial.isOpen ? 1 : 0);
