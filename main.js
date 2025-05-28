@@ -1,14 +1,15 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-const { SerialPort, ReadlineParser } = require('serialport'); // Importe ReadlineParser
+// Importar Buffer para trabalhar com caracteres ASCII específicos
+const { SerialPort, ReadlineParser } = require('serialport'); // ReadlineParser ainda é útil se cada resposta terminar com \r\n
 const express = require('express');
 const cors = require('cors');
 
 let mainWindow;
 let server = null;
 let serial = null;
-let pesoAtual = ''; // Armazena a string do peso lido da balança
-let pollIntervalId = null; // Para o setInterval que enviará o comando 'R'
+let pesoAtual = '';
+let pollIntervalId = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -21,7 +22,6 @@ function createWindow() {
       devTools: true,
     },
   });
-
   mainWindow.loadFile('index.html');
 }
 
@@ -34,10 +34,8 @@ app.whenReady().then(() => {
   });
 });
 
-// Manipulador IPC para iniciar o servidor e a porta serial
 ipcMain.handle('start-server', async (_, config) => {
   const { port, baudRate, httpPort } = config;
-
   console.log(`[Main Process] Tentando iniciar servidor: Port=${port}, BaudRate=${baudRate}, HTTP Port=${httpPort}`);
 
   return new Promise((resolve, reject) => {
@@ -54,12 +52,10 @@ ipcMain.handle('start-server', async (_, config) => {
       return reject('Erro: Porta Serial não pode ser vazia.');
     }
 
-    // --- Iniciar Porta Serial ---
     if (serial && serial.isOpen) {
       serial.close();
       console.log(`[SerialPort] Porta serial ${serial.path} fechada antes de reabrir.`);
     }
-    // Limpa o intervalo de polling anterior, se houver
     if (pollIntervalId) {
         clearInterval(pollIntervalId);
         pollIntervalId = null;
@@ -69,8 +65,10 @@ ipcMain.handle('start-server', async (_, config) => {
         serial = new SerialPort({
             path: port,
             baudRate: parsedBaudRate,
-            // O parser Readline é ideal para balanças que enviam o peso em uma linha seguida de \r\n
-            // parser: new ReadlineParser({ delimiter: '\r\n' }) // Balanças Toledo geralmente usam \r\n
+            // A balança Toledo envia uma sequência, então ReadlineParser é útil.
+            // O manual não especifica um delimitador \r\n na resposta, mas muitas balanças usam.
+            // Se o \r\n não funcionar, você pode precisar de um parser de bytes para o STX/ETX.
+            parser: new ReadlineParser({ delimiter: '\r\n' }) // Tente com \r\n, é comum mesmo se não explícito no manual.
         });
     } catch (err) {
         console.error(`[SerialPort] Erro ao criar SerialPort: ${err.message}`);
@@ -80,80 +78,92 @@ ipcMain.handle('start-server', async (_, config) => {
     serial.on('open', () => {
       console.log(`[SerialPort] Porta ${port} aberta com sucesso!`);
 
-      // === IMPORTANTE: Enviar comando 'R' (Request Weight) para a balança ===
-      // A balança Toledo Prix 3 Fit geralmente precisa de um comando para enviar o peso.
-      // O comando 'R' (ASCII 82) seguido de um caractere de retorno de carro (\r) é comum.
-      const requestCommand = 'R\r'; // Comando 'R' + CR
+      // === COMANDO DE POLLING PARA TOLEDO PRIX 3FIT ===
+      // O comando para solicitar o peso é [ENQ] (ASCII 05 H).
+      const requestCommand = Buffer.from([0x05]); // Cria um Buffer com o byte ENQ
 
-      // Define um intervalo para enviar o comando de polling
-      // A frequência do polling deve ser razoável para não sobrecarregar a balança.
-      // 500ms (0.5s) a 1000ms (1s) é um bom começo.
-      const pollingFrequency = 500; // Milissegundos
+      const pollingFrequency = 500; // 500ms é um bom intervalo para polling
 
       pollIntervalId = setInterval(() => {
         if (serial && serial.isOpen) {
           serial.write(requestCommand, (err) => {
             if (err) {
-              console.error(`[SerialPort] Erro ao enviar comando de polling: ${err.message}`);
+              console.error(`[SerialPort] Erro ao enviar comando ENQ: ${err.message}`);
             } else {
-              // console.log(`[SerialPort] Comando '${requestCommand.trim()}' enviado.`); // Logar para depuração
-            }
-          });
-          serial.write('P\r', (err) => {
-            if (err) {
-              console.error(`[SerialPort] Erro ao enviar comando de polling: ${err.message}`);
-            } else {
-              // console.log(`[SerialPort] Comando '${requestCommand.trim()}' enviado.`); // Logar para depuração
-            }
-          });
-          serial.write('S\r', (err) => {
-            if (err) {
-              console.error(`[SerialPort] Erro ao enviar comando de polling: ${err.message}`);
-            } else {
-              // console.log(`[SerialPort] Comando '${requestCommand.trim()}' enviado.`); // Logar para depuração
+              // console.log(`[SerialPort] Comando ENQ (${requestCommand.toString('hex')}) enviado.`);
             }
           });
         }
       }, pollingFrequency);
     });
 
-    // === IMPORTANTE: Lógica de parseamento da resposta da balança ===
     serial.on('data', (data) => {
-      // Com ReadlineParser, 'data' já é uma linha terminada por \r\n
-      const rawData = data.toString().trim();
-      console.log(`[SerialPort - Main] Dados brutos recebidos: '${rawData}'`);
+      const rawData = data.toString().trim(); // rawData já é uma linha pelo ReadlineParser
+      console.log(`[SerialPort - Main] Dados brutos recebidos: '${rawData}' (Hex: ${Buffer.from(rawData).toString('hex')})`);
 
-      // Exemplo de formato da Toledo Prix 3 Fit:
-      // "S I 00000.00kg" (estável, positivo)
-      // "U I 00000.00kg" (instável, positivo)
-      // "S I 00000.00kg" (estável, zero)
-      // "E 1" (erro)
-      // O peso está após o 4º caractere, formatado com 5 dígitos inteiros e 2 decimais.
+      // === LÓGICA DE PARSEAMENTO PARA TOLEDO PRIX 3FIT ===
+      // Formato esperado: [STX][ppppppp][iiii][ETX]
+      // Exemplo no manual: [STX]0014385[ETX] para 14.385 (14kg 385g)
 
-      // Regex para extrair o número do peso (inteiro e decimal)
-      // Procura por "S I" ou "U I" seguido de 5 dígitos, um ponto, 2 dígitos e "kg".
-      const match = rawData.match(/[SU] I (\d{5}\.\d{2})kg/);
+      // Remover STX (0x02) e ETX (0x03) se eles ainda estiverem na string
+      // Eles não deveriam estar se o ReadlineParser com \r\n estiver funcionando.
+      // Mas para segurança, vamos removê-los.
+      let cleanData = rawData.replace(/\x02|\x03/g, ''); // Remove STX e ETX por seus códigos hexadecimais
+
+      // Regex para validar o formato do peso e indicadores
+      // Procura 7 dígitos para o peso (ppppppp) e 5 caracteres para o indicador (iiii)
+      // O manual mostra 5 dígitos para pppppp no exemplo 0014385 (que tem 7),
+      // e 5 caracteres para iiii (11111, 00000, SSSSS).
+      // Vamos assumir que ppppppp tem 7 caracteres (5 inteiros, 2 decimais implícitos).
+      const match = cleanData.match(/^(\d{7})([10S]{5})$/); // Captura 7 dígitos para peso e 5 caracteres para indicador
 
       if (match && match[1]) {
-        // Extrai o número formatado como "00000.00"
-        const weightString = match[1];
-        // Converte para gramas (multiplicando por 1000) e remove o ponto
-        // Ou, se o seu frontend espera gramas, multiplique e remova o decimal.
-        // Se o frontend espera "341" para 341g, e a balança envia "00000.34kg",
-        // você precisa multiplicar por 1000 e converter para inteiro.
-        // Ex: "00000.34" kg -> 0.34 kg * 1000 = 340 gramas
-        const weightInKilos = parseFloat(weightString); // Ex: 0.34
-        const weightInGrams = Math.round(weightInKilos * 1000); // Ex: 340
+        const pesoRaw = match[1]; // Ex: "0014385"
+        const indicador = match[2]; // Ex: "11111" ou "00000"
 
-        pesoAtual = weightInGrams.toString(); // Armazena como string
-        console.log(`[SerialPort - Main] Peso extraído: ${pesoInKilos}kg -> ${pesoAtual}g`);
+        // Parte inteira: primeiros 5 dígitos (ex: "00143")
+        // Parte decimal: últimos 2 dígitos (ex: "85")
+        const pesoInteiroStr = pesoRaw.substring(0, 5);
+        const pesoDecimalStr = pesoRaw.substring(5, 7);
+
+        // Converte para um número float em kg (ex: 14.38)
+        const pesoEmKilos = parseFloat(`${parseInt(pesoInteiroStr)}.${pesoDecimalStr}`);
+        // Converte para gramas (espera-se que o frontend lide com gramas)
+        const pesoEmGrams = Math.round(pesoEmKilos * 1000);
+
+        // Verifique o indicador para determinar se o peso é válido
+        let pesoValido = true;
+        if (indicador === '11111') {
+            console.log('[SerialPort - Main] Balança indica peso instável.');
+            pesoValido = false;
+        } else if (indicador === '00000') {
+            console.log('[SerialPort - Main] Balança indica peso negativo ou zero.');
+            // Se o peso for 00000.00kg, é 0.
+            if (pesoEmGrams === 0) {
+                // A balança está zerada, isso é um peso válido para resetar.
+            } else {
+                // É um peso negativo que a balança não consegue indicar. Considerar inválido para impressão.
+                pesoValido = false;
+            }
+        } else if (indicador === 'SSSSS') {
+            console.log('[SerialPort - Main] Balança indica sobrecarga.');
+            pesoValido = false;
+        }
+
+        if (pesoValido) {
+            pesoAtual = pesoEmGrams.toString(); // Armazena o peso em gramas como string
+            console.log(`[SerialPort - Main] Peso extraído: ${pesoEmKilos.toFixed(3)}kg -> ${pesoAtual}g`);
+        } else {
+            pesoAtual = ''; // Ou 0, se preferir
+            console.log(`[SerialPort - Main] Peso inválido ou instável detectado (${indicador}). Peso zerado.`);
+        }
+
       } else {
-        // Se não encontrar o padrão esperado, o peso é considerado 0 ou vazio
-        pesoAtual = ''; // Ou '0' se preferir manter um 0.
-        console.log(`[SerialPort - Main] Formato de resposta inesperado ou peso inválido: '${rawData}'. Peso zerado.`);
+        // Se não encontrar o padrão Toledo esperado
+        console.log(`[SerialPort - Main] Formato de resposta inesperado ou não-peso: '${rawData}'. Peso zerado.`);
+        pesoAtual = ''; // Reseta se o formato não é o do peso
       }
 
-      // Envia o peso para o processo de renderização (frontend do Electron)
       mainWindow.webContents.send('peso', pesoAtual);
     });
 
@@ -164,7 +174,7 @@ ipcMain.handle('start-server', async (_, config) => {
         server.close();
         server = null;
       }
-      if (pollIntervalId) { // Limpa o polling em caso de erro grave
+      if (pollIntervalId) {
         clearInterval(pollIntervalId);
         pollIntervalId = null;
       }
@@ -172,7 +182,7 @@ ipcMain.handle('start-server', async (_, config) => {
 
     serial.on('close', () => {
       console.log(`[SerialPort] Porta ${port} fechada.`);
-      if (pollIntervalId) { // Limpa o polling quando a porta fecha
+      if (pollIntervalId) {
         clearInterval(pollIntervalId);
         pollIntervalId = null;
       }
@@ -180,7 +190,7 @@ ipcMain.handle('start-server', async (_, config) => {
 
     // --- Iniciar Servidor Express ---
     const appExpress = express();
-    appExpress.use(cors()); // Configure a origem para produção
+    appExpress.use(cors());
 
     appExpress.get('/peso', (req, res) => {
       const responseData = {
@@ -201,7 +211,7 @@ ipcMain.handle('start-server', async (_, config) => {
         serial.close();
         serial = null;
       }
-      if (pollIntervalId) { // Limpa o polling se o Express falhar
+      if (pollIntervalId) {
         clearInterval(pollIntervalId);
         pollIntervalId = null;
       }
@@ -210,10 +220,9 @@ ipcMain.handle('start-server', async (_, config) => {
   });
 });
 
-// Manipulador IPC para parar tudo
 ipcMain.handle('stop-server', () => {
   return new Promise((resolve, reject) => {
-    if (pollIntervalId) { // Garante que o polling seja parado ao fechar
+    if (pollIntervalId) {
         clearInterval(pollIntervalId);
         pollIntervalId = null;
         console.log('[SerialPort] Polling parado.');
@@ -260,7 +269,6 @@ ipcMain.handle('stop-server', () => {
   });
 });
 
-// Garante que os serviços sejam fechados ao encerrar o aplicativo
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
@@ -278,7 +286,7 @@ app.on('window-all-closed', () => {
       serial = null;
     });
   }
-  if (pollIntervalId) { // Limpa o polling também no encerramento do app
+  if (pollIntervalId) {
     clearInterval(pollIntervalId);
     pollIntervalId = null;
     console.log('[SerialPort] Polling parado no encerramento do app.');
