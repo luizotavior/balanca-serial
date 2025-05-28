@@ -70,7 +70,7 @@ ipcMain.handle('start-server', async (_, config) => {
             path: port,
             baudRate: parsedBaudRate,
             // O parser Readline é ideal para balanças que enviam o peso em uma linha seguida de \r\n
-            parser: new ReadlineParser({ delimiter: '\r\n' }) // Balanças Toledo geralmente usam \r\n
+            // parser: new ReadlineParser({ delimiter: '\r\n' }) // Balanças Toledo geralmente usam \r\n
         });
     } catch (err) {
         console.error(`[SerialPort] Erro ao criar SerialPort: ${err.message}`);
@@ -93,6 +93,20 @@ ipcMain.handle('start-server', async (_, config) => {
       pollIntervalId = setInterval(() => {
         if (serial && serial.isOpen) {
           serial.write(requestCommand, (err) => {
+            if (err) {
+              console.error(`[SerialPort] Erro ao enviar comando de polling: ${err.message}`);
+            } else {
+              // console.log(`[SerialPort] Comando '${requestCommand.trim()}' enviado.`); // Logar para depuração
+            }
+          });
+          serial.write('P\r', (err) => {
+            if (err) {
+              console.error(`[SerialPort] Erro ao enviar comando de polling: ${err.message}`);
+            } else {
+              // console.log(`[SerialPort] Comando '${requestCommand.trim()}' enviado.`); // Logar para depuração
+            }
+          });
+          serial.write('S\r', (err) => {
             if (err) {
               console.error(`[SerialPort] Erro ao enviar comando de polling: ${err.message}`);
             } else {
