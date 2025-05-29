@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const portInput = document.getElementById('port');
     const baudRateInput = document.getElementById('baudRate');
     const httpPortInput = document.getElementById('httpPort');
+    const wsPortInput = document.getElementById('wsPort'); // <-- NOVA LINHA ADICIONADA AQUI
     const pesoDiv = document.getElementById('peso');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
@@ -15,7 +16,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const config = {
             port: portInput.value,
             baudRate: baudRateInput.value,
-            httpPort: httpPortInput.value
+            httpPort: httpPortInput.value,
+            wsPort: wsPortInput.value // <-- NOVA LINHA: Adicionando o valor da porta WebSocket
         };
 
         // Feedback visual: iniciando
@@ -26,6 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
         portInput.disabled = true;
         baudRateInput.disabled = true;
         httpPortInput.disabled = true;
+        wsPortInput.disabled = true; // <-- NOVA LINHA: Desabilitando o campo wsPort
 
         try {
             const message = await window.electronAPI.startServer(config);
@@ -39,6 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
             portInput.disabled = false;
             baudRateInput.disabled = false;
             httpPortInput.disabled = false;
+            wsPortInput.disabled = false; // <-- NOVA LINHA: Re-habilitando o campo wsPort em caso de erro
         }
     });
 
@@ -59,6 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
             portInput.disabled = false;
             baudRateInput.disabled = false;
             httpPortInput.disabled = false;
+            wsPortInput.disabled = false; // <-- NOVA LINHA: Habilitando o campo wsPort
         } catch (error) {
             statusMessageDiv.textContent = `Erro ao parar: ${error}`;
             statusMessageDiv.className = 'status-message error';
@@ -85,4 +90,5 @@ document.addEventListener('DOMContentLoaded', () => {
     portInput.disabled = false;
     baudRateInput.disabled = false;
     httpPortInput.disabled = false;
+    wsPortInput.disabled = false; // <-- NOVA LINHA: Habilitando o campo wsPort no início
 });

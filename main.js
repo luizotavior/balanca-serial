@@ -1,27 +1,38 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-// Importar Buffer para trabalhar com caracteres ASCII específicos
-const { SerialPort, ReadlineParser } = require('serialport'); // ReadlineParser ainda é útil se cada resposta terminar com \r\n
+const { SerialPort, ReadlineParser } = require('serialport');
 const express = require('express');
 const cors = require('cors');
+const { WebSocketServer } = require('ws'); // Importar o WebSocketServer
 
 let mainWindow;
-let server = null;
-let serial = null;
+let expressServer = null; // Renomeado para expressServer para clareza
+let wsServer = null;      // Para o servidor WebSocket
+let serialPort = null;    // Renomeado para serialPort para clareza
 let pesoAtual = '';
 let pollIntervalId = null;
 
+// --- Configurações que você pode querer tornar configuráveis no frontend ---
+const BALANCE_POLLING_FREQUENCY_MS = 500; // Frequência para enviar ENQ para a balança
+const WEIGH_IN_GRAMS_THRESHOLD = 30; // Peso mínimo em gramas para considerar válido
+const WEIGHT_PRINT_MARGIN_GRAMS = 10; // Margem para reimpressão
+const PRICE_PER_KILO = 72.90; // Preço para cálculo (pode vir de config/DB)
+// ---
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 600,
-    height: 450,
+    width: 570,
+    height: 802,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       devTools: true,
+      backgroundThrottling: false, // Tenta desativar o throttling
     },
+      autoHideMenuBar: true, // Oculta a barra de menus por padrão
   });
+
   mainWindow.loadFile('index.html');
 }
 
@@ -35,219 +46,207 @@ app.whenReady().then(() => {
 });
 
 ipcMain.handle('start-server', async (_, config) => {
-  const { port, baudRate, httpPort } = config;
-  console.log(`[Main Process] Tentando iniciar servidor: Port=${port}, BaudRate=${baudRate}, HTTP Port=${httpPort}`);
+  const { port, baudRate, httpPort, wsPort } = config; // Adicionado wsPort aqui
 
-  return new Promise((resolve, reject) => {
+  console.log(`[Main Process] Tentando iniciar serviços: Serial=${port}, BaudRate=${baudRate}, HTTP Port=${httpPort}, WS Port=${wsPort}`);
+
+  return new Promise(async (resolve, reject) => { // Tornar a Promise async para usar await
     const parsedBaudRate = parseInt(baudRate);
     const parsedHttpPort = parseInt(httpPort);
+    const parsedWsPort = parseInt(wsPort); // Parsear a porta do WebSocket
 
-    if (isNaN(parsedBaudRate) || parsedBaudRate <= 0) {
-      return reject('Erro: Baud Rate inválido. Deve ser um número positivo.');
-    }
-    if (isNaN(parsedHttpPort) || parsedHttpPort <= 0) {
-      return reject('Erro: Porta HTTP inválida. Deve ser um número positivo.');
-    }
-    if (!port) {
-      return reject('Erro: Porta Serial não pode ser vazia.');
-    }
+    // --- Validações de Entrada ---
+    if (isNaN(parsedBaudRate) || parsedBaudRate <= 0) return reject('Erro: Baud Rate inválido.');
+    if (isNaN(parsedHttpPort) || parsedHttpPort <= 0) return reject('Erro: Porta HTTP inválida.');
+    if (isNaN(parsedWsPort) || parsedWsPort <= 0) return reject('Erro: Porta WebSocket inválida.');
+    if (!port) return reject('Erro: Porta Serial não pode ser vazia.');
 
-    if (serial && serial.isOpen) {
-      serial.close();
-      console.log(`[SerialPort] Porta serial ${serial.path} fechada antes de reabrir.`);
+    // --- Fechar serviços anteriores se estiverem abertos ---
+    if (expressServer) {
+        expressServer.close(() => console.log('[Express] Servidor Express fechado antes de reabrir.'));
+        expressServer = null;
+    }
+    if (wsServer) {
+        wsServer.close(() => console.log('[WebSocket] Servidor WebSocket fechado antes de reabrir.'));
+        wsServer = null;
+    }
+    if (serialPort && serialPort.isOpen) {
+        serialPort.close(() => console.log(`[SerialPort] Porta serial ${serialPort.path} fechada antes de reabrir.`));
+        serialPort = null;
     }
     if (pollIntervalId) {
         clearInterval(pollIntervalId);
         pollIntervalId = null;
     }
+    pesoAtual = ''; // Reseta peso ao reiniciar
 
-    try {
-        serial = new SerialPort({
-            path: port,
-            baudRate: parsedBaudRate,
-            // A balança Toledo envia uma sequência, então ReadlineParser é útil.
-            // O manual não especifica um delimitador \r\n na resposta, mas muitas balanças usam.
-            // Se o \r\n não funcionar, você pode precisar de um parser de bytes para o STX/ETX.
-            parser: new ReadlineParser({ delimiter: '\r\n' }) // Tente com \r\n, é comum mesmo se não explícito no manual.
-        });
-    } catch (err) {
-        console.error(`[SerialPort] Erro ao criar SerialPort: ${err.message}`);
-        return reject(`Erro ao configurar porta serial: ${err.message}`);
-    }
-
-    serial.on('open', () => {
-      console.log(`[SerialPort] Porta ${port} aberta com sucesso!`);
-
-      // === COMANDO DE POLLING PARA TOLEDO PRIX 3FIT ===
-      // O comando para solicitar o peso é [ENQ] (ASCII 05 H).
-      const requestCommand = Buffer.from([0x05]); // Cria um Buffer com o byte ENQ
-
-      const pollingFrequency = 500; // 500ms é um bom intervalo para polling
-
-      pollIntervalId = setInterval(() => {
-        if (serial && serial.isOpen) {
-          serial.write(requestCommand, (err) => {
-            if (err) {
-              console.error(`[SerialPort] Erro ao enviar comando ENQ: ${err.message}`);
-            } else {
-              // console.log(`[SerialPort] Comando ENQ (${requestCommand.toString('hex')}) enviado.`);
-            }
-          });
-        }
-      }, pollingFrequency);
-    });
-
-    serial.on('data', (data) => {
-      const rawData = data.toString().trim();
-      console.log(`[SerialPort - Main] Dados brutos recebidos: '${rawData}' (Hex: ${Buffer.from(rawData).toString('hex')})`);
-
-      // Toledo Prix 3Fit - Novo Parseamento para [STX]NNNNN[ETX] ou [STX]NNNNNN[ETX]
-      // O Hex que você mostrou (02303032353203) é STX (02) + "00252" + ETX (03)
-      // Então, a string rawData será "00252" (se o ReadlineParser já remover STX/ETX, o que é improvável)
-      // Ou será '\x0200252\x03' (se o ReadlineParser estiver apenas quebrando por \r\n).
-
-      // Primeiro, remova STX (0x02) e ETX (0x03) da string, se presentes.
-      // Isso garante que só tenhamos os dígitos do peso.
-      let cleanData = rawData.replace(/\x02|\x03/g, ''); // Remove STX (0x02) e ETX (0x03)
-
-      // Agora, tente extrair os dígitos numéricos.
-      // O peso "00252" sugere 3 casas decimais implícitas ou que o valor é em gramas diretamente.
-      // Se 00252 significa 252 gramas, então é só converter para inteiro.
-      // Se 00252 significa 0.252 kg, precisamos dividir por 1000.
-      const extractedWeightMatch = cleanData.match(/^(\d+)$/); // Procura uma string que consiste APENAS de dígitos
-
-      if (extractedWeightMatch && extractedWeightMatch[1]) {
-        const pesoRaw = extractedWeightMatch[1]; // Ex: "00252"
-
-        // --- LÓGICA DE CONVERSÃO DO PESO ---
-        // A Toledo Prix geralmente envia em gramas ou com 3 casas decimais implícitas.
-        // Se "00252" = 252g:
-        const pesoEmGrams = parseInt(pesoRaw);
-        console.log(`[SerialPort - Main] Peso extraído: ${pesoEmGrams}g (assumindo formato em gramas)`);
-
-        // Se "00252" = 0.252 kg (252 gramas), que é o mais provável para balanças em kg
-        // const pesoEmKilos = parseInt(pesoRaw) / 1000; // Ex: 0.252
-        // const pesoEmGrams = Math.round(pesoEmKilos * 1000); // 252
-
-        // Ou se 5 dígitos: 00252 -> 2.52 kg (assumindo 2 casas decimais)
-        // const pesoInteiroStr = pesoRaw.substring(0, pesoRaw.length - 2);
-        // const pesoDecimalStr = pesoRaw.substring(pesoRaw.length - 2);
-        // const pesoEmKilos = parseFloat(`${parseInt(pesoInteiroStr)}.${pesoDecimalStr}`);
-        // const pesoEmGrams = Math.round(pesoEmKilos * 1000);
-
-        // O mais seguro para "00252" é assumir que são gramas se a balança pesa em kg com 3 casas decimais.
-        // Se a balança pesa em kg com 2 casas decimais, um peso de 252g seria "000.25".
-
-        pesoAtual = pesoEmGrams.toString(); // Armazena como string (frontend espera gramas)
-
-      } else {
-        // Se não encontrar o padrão numérico esperado
-        console.log(`[SerialPort - Main] Formato de resposta de peso inesperado: '${cleanData}'. Peso zerado.`);
-        pesoAtual = ''; // Ou '0'
-      }
-
-      mainWindow.webContents.send('peso', pesoAtual);
-    });
-
-    serial.on('error', (err) => {
-      console.error(`[SerialPort] ERRO CRÍTICO na serial ${port}: ${err.message}`);
-      reject(`Erro grave na porta serial: ${err.message}`);
-      if (server) {
-        server.close();
-        server = null;
-      }
-      if (pollIntervalId) {
-        clearInterval(pollIntervalId);
-        pollIntervalId = null;
-      }
-    });
-
-    serial.on('close', () => {
-      console.log(`[SerialPort] Porta ${port} fechada.`);
-      if (pollIntervalId) {
-        clearInterval(pollIntervalId);
-        pollIntervalId = null;
-      }
-    });
-
-    // --- Iniciar Servidor Express ---
+    // --- Iniciar Servidor Express (HTTP) ---
     const appExpress = express();
     appExpress.use(cors());
 
     appExpress.get('/peso', (req, res) => {
-      const responseData = {
-        data: {
-          peso: parseInt(pesoAtual) || 0
-        }
-      };
+      const responseData = { data: { peso: parseInt(pesoAtual) || 0 } };
       console.log(`[Express] Requisição /peso. Retornando:`, responseData);
       res.json(responseData);
     });
 
-    server = appExpress.listen(parsedHttpPort, () => {
-      console.log(`[Express] Servidor Express rodando em http://localhost:${parsedHttpPort}`);
-      resolve(`Balança conectada em ${port} e servidor HTTP em http://localhost:${parsedHttpPort}`);
-    }).on('error', (err) => {
-      console.error(`[Express] ERRO CRÍTICO ao iniciar Express na porta ${parsedHttpPort}: ${err.message}`);
-      if (serial && serial.isOpen) {
-        serial.close();
-        serial = null;
+    try {
+        await new Promise((res, rej) => {
+            expressServer = appExpress.listen(parsedHttpPort, () => {
+                console.log(`[Express] Servidor Express rodando em http://localhost:${parsedHttpPort}`);
+                res();
+            }).on('error', rej);
+        });
+    } catch (err) {
+        console.error(`[Express] ERRO CRÍTICO ao iniciar Express na porta ${parsedHttpPort}: ${err.message}`);
+        return reject(`Erro ao iniciar servidor HTTP: ${err.message}`);
+    }
+
+    // --- Iniciar Servidor WebSocket ---
+    try {
+        await new Promise((res, rej) => {
+            wsServer = new WebSocketServer({ port: parsedWsPort });
+            wsServer.on('connection', ws => {
+                console.log('[WebSocket] Cliente conectado.');
+                ws.on('message', message => console.log(`[WebSocket] Mensagem recebida do cliente: ${message}`));
+                ws.on('close', () => console.log('[WebSocket] Cliente desconectado.'));
+                ws.on('error', error => console.error('[WebSocket] Erro no cliente:', error));
+            });
+            wsServer.on('error', rej);
+            wsServer.on('listening', () => { // Evento 'listening' é disparado quando o servidor está pronto
+                console.log(`[WebSocket] Servidor WebSocket iniciado na porta ${parsedWsPort}`);
+                res();
+            });
+        });
+    } catch (err) {
+        console.error(`[WebSocket] ERRO CRÍTICO ao iniciar WebSocket na porta ${parsedWsPort}: ${err.message}`);
+        if (expressServer) expressServer.close();
+        return reject(`Erro ao iniciar servidor WebSocket: ${err.message}`);
+    }
+
+    // --- Iniciar Porta Serial ---
+    try {
+        serialPort = new SerialPort({
+            path: port,
+            baudRate: parsedBaudRate,
+            parser: new ReadlineParser({ delimiter: '\r\n' }) // Para Toledo Prix 3Fit
+        });
+    } catch (err) {
+        console.error(`[SerialPort] Erro ao criar SerialPort: ${err.message}`);
+        if (expressServer) expressServer.close();
+        if (wsServer) wsServer.close();
+        return reject(`Erro ao configurar porta serial: ${err.message}`);
+    }
+
+    serialPort.on('open', () => {
+      console.log(`[SerialPort] Porta ${port} aberta com sucesso!`);
+
+      // === Polling da Balança (ENQ) ===
+      const requestCommand = Buffer.from([0x05]); // ENQ (ASCII 05 H)
+      pollIntervalId = setInterval(() => {
+        if (serialPort && serialPort.isOpen) {
+          serialPort.write(requestCommand, (err) => {
+            if (err) console.error(`[SerialPort] Erro ao enviar comando ENQ: ${err.message}`);
+          });
+        }
+      }, BALANCE_POLLING_FREQUENCY_MS); // Frequência definida acima
+
+      // Resolve a Promise somente quando TUDO está pronto
+      resolve(`Serviços iniciados: Serial em ${port}, HTTP em ${parsedHttpPort}, WS em ${parsedWsPort}`);
+    });
+
+    serialPort.on('data', (data) => {
+      const rawData = data.toString().trim();
+      // console.log(`[SerialPort - Main] Dados brutos recebidos: '${rawData}' (Hex: ${Buffer.from(rawData).toString('hex')})`);
+
+      let cleanData = rawData.replace(/\x02|\x03/g, ''); // Remove STX e ETX
+
+      const extractedWeightMatch = cleanData.match(/^(\d+)$/);
+
+      let currentWeightInGrams = 0; // Padrão
+      if (extractedWeightMatch && extractedWeightMatch[1]) {
+        currentWeightInGrams = parseInt(extractedWeightMatch[1]);
+        console.log(`[SerialPort - Main] Peso extraído: ${currentWeightInGrams}g`);
+      } else {
+        console.log(`[SerialPort - Main] Formato de resposta de peso inesperado: '${cleanData}'. Peso zerado.`);
       }
-      if (pollIntervalId) {
-        clearInterval(pollIntervalId);
-        pollIntervalId = null;
-      }
-      reject(`Erro ao iniciar servidor HTTP: ${err.message}`);
+
+      pesoAtual = currentWeightInGrams.toString(); // Atualiza a variável para o endpoint HTTP
+
+      // === Enviar peso via WebSocket para clientes conectados ===
+      wsServer.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({ data: { peso: currentWeightInGrams } })); // Envia no formato esperado pelo frontend
+          }
+      });
+    });
+
+    serialPort.on('error', (err) => {
+      console.error(`[SerialPort] ERRO CRÍTICO na serial ${port}: ${err.message}`);
+      // Lógica de fechamento em caso de erro grave
+      if (expressServer) expressServer.close();
+      if (wsServer) wsServer.close();
+      if (pollIntervalId) clearInterval(pollIntervalId);
+      reject(`Erro grave na porta serial: ${err.message}`);
+    });
+
+    serialPort.on('close', () => {
+      console.log(`[SerialPort] Porta ${port} fechada.`);
+      if (pollIntervalId) clearInterval(pollIntervalId);
     });
   });
 });
 
 ipcMain.handle('stop-server', () => {
-  return new Promise((resolve, reject) => {
-    if (pollIntervalId) {
-        clearInterval(pollIntervalId);
-        pollIntervalId = null;
-        console.log('[SerialPort] Polling parado.');
-    }
-
+  return new Promise(async (resolve, reject) => {
     let closedCount = 0;
-    const totalToClose = (server ? 1 : 0) + (serial && serial.isOpen ? 1 : 0);
+    const totalToClose = (expressServer ? 1 : 0) + (wsServer ? 1 : 0) + (serialPort && serialPort.isOpen ? 1 : 0);
 
     const checkAndResolve = () => {
       if (closedCount === totalToClose) {
-        console.log('[Main Process] Todos os serviços (serial e Express) parados.');
+        console.log('[Main Process] Todos os serviços parados.');
         pesoAtual = '';
         resolve('Serviços parados com sucesso.');
       }
     };
 
-    if (server) {
-      server.close((err) => {
+    if (pollIntervalId) {
+      clearInterval(pollIntervalId);
+      pollIntervalId = null;
+      console.log('[SerialPort] Polling parado.');
+    }
+
+    if (expressServer) {
+      expressServer.close((err) => {
         if (err) console.error('[Express] Erro ao fechar servidor Express:', err);
         else console.log('[Express] Servidor Express parado.');
-        server = null;
+        expressServer = null;
         closedCount++;
         checkAndResolve();
       });
-    } else {
-      closedCount++;
-    }
+    } else { closedCount++; }
 
-    if (serial && serial.isOpen) {
-      serial.close((err) => {
+    if (wsServer) {
+      wsServer.close((err) => {
+        if (err) console.error('[WebSocket] Erro ao fechar servidor WebSocket:', err);
+        else console.log('[WebSocket] Servidor WebSocket parado.');
+        wsServer = null;
+        closedCount++;
+        checkAndResolve();
+      });
+    } else { closedCount++; }
+
+    if (serialPort && serialPort.isOpen) {
+      serialPort.close((err) => {
         if (err) console.error('[SerialPort] Erro ao fechar serial:', err);
         else console.log('[SerialPort] Porta serial fechada.');
-        serial = null;
+        serialPort = null;
         closedCount++;
         checkAndResolve();
       });
-    } else {
-      closedCount++;
-    }
+    } else { closedCount++; }
 
-    if (totalToClose === 0) {
-      checkAndResolve();
-    }
+    if (totalToClose === 0) checkAndResolve();
   });
 });
 
@@ -255,22 +254,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
-  if (server) {
-    server.close(() => {
-      console.log('[Express] Servidor Express parado devido ao fechamento do aplicativo.');
-      server = null;
-    });
-  }
-  if (serial && serial.isOpen) {
-    serial.close((err) => {
-      if (err) console.error('[SerialPort] Erro ao fechar serial no encerramento do app:', err);
-      else console.log('[SerialPort] Porta serial fechada devido ao fechamento do aplicativo.');
-      serial = null;
-    });
-  }
-  if (pollIntervalId) {
-    clearInterval(pollIntervalId);
-    pollIntervalId = null;
-    console.log('[SerialPort] Polling parado no encerramento do app.');
-  }
+  // Garante que todos os serviços sejam fechados ao encerrar o aplicativo
+  if (expressServer) expressServer.close();
+  if (wsServer) wsServer.close();
+  if (serialPort && serialPort.isOpen) serialPort.close();
+  if (pollIntervalId) clearInterval(pollIntervalId);
 });

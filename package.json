@@ -23,7 +23,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.ico",
@@ -36,7 +38,8 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "serialport": "^13.0.0"
+    "serialport": "^13.0.0",
+    "ws": "^8.18.2"
   },
   "devDependencies": {
     "electron": "^36.2.1",
