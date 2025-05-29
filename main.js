@@ -97,57 +97,57 @@ ipcMain.handle('start-server', async (_, config) => {
       }, pollingFrequency);
     });
 
-serial.on('data', (data) => {
-  const rawData = data.toString().trim();
-  console.log(`[SerialPort - Main] Dados brutos recebidos: '${rawData}' (Hex: ${Buffer.from(rawData).toString('hex')})`);
+    serial.on('data', (data) => {
+      const rawData = data.toString().trim();
+      console.log(`[SerialPort - Main] Dados brutos recebidos: '${rawData}' (Hex: ${Buffer.from(rawData).toString('hex')})`);
 
-  // Toledo Prix 3Fit - Novo Parseamento para [STX]NNNNN[ETX] ou [STX]NNNNNN[ETX]
-  // O Hex que você mostrou (02303032353203) é STX (02) + "00252" + ETX (03)
-  // Então, a string rawData será "00252" (se o ReadlineParser já remover STX/ETX, o que é improvável)
-  // Ou será '\x0200252\x03' (se o ReadlineParser estiver apenas quebrando por \r\n).
+      // Toledo Prix 3Fit - Novo Parseamento para [STX]NNNNN[ETX] ou [STX]NNNNNN[ETX]
+      // O Hex que você mostrou (02303032353203) é STX (02) + "00252" + ETX (03)
+      // Então, a string rawData será "00252" (se o ReadlineParser já remover STX/ETX, o que é improvável)
+      // Ou será '\x0200252\x03' (se o ReadlineParser estiver apenas quebrando por \r\n).
 
-  // Primeiro, remova STX (0x02) e ETX (0x03) da string, se presentes.
-  // Isso garante que só tenhamos os dígitos do peso.
-  let cleanData = rawData.replace(/\x02|\x03/g, ''); // Remove STX (0x02) e ETX (0x03)
+      // Primeiro, remova STX (0x02) e ETX (0x03) da string, se presentes.
+      // Isso garante que só tenhamos os dígitos do peso.
+      let cleanData = rawData.replace(/\x02|\x03/g, ''); // Remove STX (0x02) e ETX (0x03)
 
-  // Agora, tente extrair os dígitos numéricos.
-  // O peso "00252" sugere 3 casas decimais implícitas ou que o valor é em gramas diretamente.
-  // Se 00252 significa 252 gramas, então é só converter para inteiro.
-  // Se 00252 significa 0.252 kg, precisamos dividir por 1000.
-  const extractedWeightMatch = cleanData.match(/^(\d+)$/); // Procura uma string que consiste APENAS de dígitos
+      // Agora, tente extrair os dígitos numéricos.
+      // O peso "00252" sugere 3 casas decimais implícitas ou que o valor é em gramas diretamente.
+      // Se 00252 significa 252 gramas, então é só converter para inteiro.
+      // Se 00252 significa 0.252 kg, precisamos dividir por 1000.
+      const extractedWeightMatch = cleanData.match(/^(\d+)$/); // Procura uma string que consiste APENAS de dígitos
 
-  if (extractedWeightMatch && extractedWeightMatch[1]) {
-    const pesoRaw = extractedWeightMatch[1]; // Ex: "00252"
+      if (extractedWeightMatch && extractedWeightMatch[1]) {
+        const pesoRaw = extractedWeightMatch[1]; // Ex: "00252"
 
-    // --- LÓGICA DE CONVERSÃO DO PESO ---
-    // A Toledo Prix geralmente envia em gramas ou com 3 casas decimais implícitas.
-    // Se "00252" = 252g:
-    const pesoEmGrams = parseInt(pesoRaw);
-    console.log(`[SerialPort - Main] Peso extraído: ${pesoEmGrams}g (assumindo formato em gramas)`);
+        // --- LÓGICA DE CONVERSÃO DO PESO ---
+        // A Toledo Prix geralmente envia em gramas ou com 3 casas decimais implícitas.
+        // Se "00252" = 252g:
+        const pesoEmGrams = parseInt(pesoRaw);
+        console.log(`[SerialPort - Main] Peso extraído: ${pesoEmGrams}g (assumindo formato em gramas)`);
 
-    // Se "00252" = 0.252 kg (252 gramas), que é o mais provável para balanças em kg
-    // const pesoEmKilos = parseInt(pesoRaw) / 1000; // Ex: 0.252
-    // const pesoEmGrams = Math.round(pesoEmKilos * 1000); // 252
+        // Se "00252" = 0.252 kg (252 gramas), que é o mais provável para balanças em kg
+        // const pesoEmKilos = parseInt(pesoRaw) / 1000; // Ex: 0.252
+        // const pesoEmGrams = Math.round(pesoEmKilos * 1000); // 252
 
-    // Ou se 5 dígitos: 00252 -> 2.52 kg (assumindo 2 casas decimais)
-    // const pesoInteiroStr = pesoRaw.substring(0, pesoRaw.length - 2);
-    // const pesoDecimalStr = pesoRaw.substring(pesoRaw.length - 2);
-    // const pesoEmKilos = parseFloat(`${parseInt(pesoInteiroStr)}.${pesoDecimalStr}`);
-    // const pesoEmGrams = Math.round(pesoEmKilos * 1000);
+        // Ou se 5 dígitos: 00252 -> 2.52 kg (assumindo 2 casas decimais)
+        // const pesoInteiroStr = pesoRaw.substring(0, pesoRaw.length - 2);
+        // const pesoDecimalStr = pesoRaw.substring(pesoRaw.length - 2);
+        // const pesoEmKilos = parseFloat(`${parseInt(pesoInteiroStr)}.${pesoDecimalStr}`);
+        // const pesoEmGrams = Math.round(pesoEmKilos * 1000);
 
-    // O mais seguro para "00252" é assumir que são gramas se a balança pesa em kg com 3 casas decimais.
-    // Se a balança pesa em kg com 2 casas decimais, um peso de 252g seria "000.25".
+        // O mais seguro para "00252" é assumir que são gramas se a balança pesa em kg com 3 casas decimais.
+        // Se a balança pesa em kg com 2 casas decimais, um peso de 252g seria "000.25".
 
-    pesoAtual = pesoEmGrams.toString(); // Armazena como string (frontend espera gramas)
+        pesoAtual = pesoEmGrams.toString(); // Armazena como string (frontend espera gramas)
 
-  } else {
-    // Se não encontrar o padrão numérico esperado
-    console.log(`[SerialPort - Main] Formato de resposta de peso inesperado: '${cleanData}'. Peso zerado.`);
-    pesoAtual = ''; // Ou '0'
-  }
+      } else {
+        // Se não encontrar o padrão numérico esperado
+        console.log(`[SerialPort - Main] Formato de resposta de peso inesperado: '${cleanData}'. Peso zerado.`);
+        pesoAtual = ''; // Ou '0'
+      }
 
-  mainWindow.webContents.send('peso', pesoAtual);
-});
+      mainWindow.webContents.send('peso', pesoAtual);
+    });
 
     serial.on('error', (err) => {
       console.error(`[SerialPort] ERRO CRÍTICO na serial ${port}: ${err.message}`);
